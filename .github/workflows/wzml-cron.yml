@@ -1,0 +1,26 @@
+name: WZML-X Cron Trigger
+
+# Fires every ~5h30m via GitHub Actions cron.
+# Uses P81 PAT to trigger the wzml-bot.yml workflow.
+
+on:
+  schedule:
+    - cron: '0 0,11,22 * * *'
+    - cron: '30 5,16 * * *'
+  workflow_dispatch:
+
+jobs:
+  trigger-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger WZML-X Bot workflow
+        env:
+          PAT_TOKEN: ${{ secrets.P81 }}
+        run: |
+          echo "Triggering wzml-bot.yml workflow..."
+          curl -s -X POST \
+            -H "Authorization: token ${PAT_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/ytdownloadweb/WZML-X-Bot/actions/workflows/wzml-bot.yml/dispatches" \
+            -d '{"ref":"main","inputs":{"hours":"5"}}'
+          echo "Trigger sent."
