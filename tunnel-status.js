@@ -1,1 +1,1 @@
-window.tunnelStatus = {"status": "online", "url": "https://fixed-knowledgestorm-favorites-spiritual.trycloudflare.com", "logUrl": "https://fancy-flour-childrens-ohio.trycloudflare.com", "updated": "2026-08-18T16:57:27Z"};
+window.tunnelStatus = {"status": "offline", "url": "", "logUrl": "", "updated": "2026-08-18T21:57:44Z"};
