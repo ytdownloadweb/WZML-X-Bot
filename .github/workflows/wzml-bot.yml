@@ -26,16 +26,16 @@ jobs:
           wget -q -O /tmp/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x /tmp/cloudflared
           /tmp/cloudflared --version
-          pip install -q pymongo requests
+          pip install -q pymongo requests yt-dlp google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
       - name: Create tunnel-status update script
         run: |
           cat > /tmp/update_status.py << 'PYEOF'
           import sys, json, base64, urllib.request
-          bot_url, log_url, timestamp, token, owner, repo = sys.argv[1:7]
-          content = f'window.tunnelStatus = {{"status": "online", "url": "{bot_url}", "logUrl": "{log_url}", "updated": "{timestamp}"}};'
-          if not bot_url:
-              content = f'window.tunnelStatus = {{"status": "offline", "url": "", "logUrl": "", "updated": "{timestamp}"}};'
+          server_url, timestamp, token, owner, repo = sys.argv[1:6]
+          content = f'window.tunnelStatus = {{"status": "online", "url": "{server_url}", "updated": "{timestamp}"}};'
+          if not server_url:
+              content = f'window.tunnelStatus = {{"status": "offline", "url": "", "updated": "{timestamp}"}};'
           api_base = f"https://api.github.com/repos/{owner}/{repo}/contents/tunnel-status.js"
           try:
               req = urllib.request.Request(api_base, headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"})
@@ -48,7 +48,7 @@ jobs:
           req = urllib.request.Request(api_base, data=json.dumps(payload).encode(), method="PUT",
               headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json", "Content-Type": "application/json"})
           urllib.request.urlopen(req)
-          print(f"tunnel-status.js updated: bot={'online' if bot_url else 'offline'}")
+          print(f"tunnel-status.js updated: {'online' if server_url else 'offline'}")
           PYEOF
 
       - name: Clone and build bot image
@@ -72,10 +72,10 @@ jobs:
         run: |
           curl -s -H "Title: WZML-X Bot Starting" \
                -H "Tags: rocket,gear" \
-               -d "Bot + log server starting up. Web URL + logs coming in ~5 min." \
+               -d "Bot + download server starting up. Web URL coming in ~5 min." \
                "https://ntfy.sh/${NTFY_TOPIC}" || true
 
-      - name: Run bot container + log server
+      - name: Run bot container + download server
         shell: bash {0}
         run: |
           docker run -d \
@@ -117,22 +117,6 @@ jobs:
           else
             echo "=== !!! Bot container CRASHED !!! ==="
             docker logs wzml_bot 2>&1 || echo "(no logs)"
-            echo "=== Container exit code ==="
-            docker inspect -f '{{.State.ExitCode}}' wzml_bot 2>/dev/null || echo "unknown"
-            echo "=== Re-running in foreground to capture error ==="
-            docker rm -f wzml_bot 2>/dev/null || true
-            timeout 60 docker run --rm \
-              --name wzml_bot_debug \
-              -e BOT_TOKEN="${{ secrets.BOT_TOKEN }}" \
-              -e TELEGRAM_API="${{ secrets.TELEGRAM_API }}" \
-              -e TELEGRAM_HASH="${{ secrets.TELEGRAM_HASH }}" \
-              -e OWNER_ID="${{ secrets.OWNER_ID }}" \
-              -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
-              -e UPSTREAM_REPO="${{ secrets.UPSTREAM_REPO }}" \
-              -e UPSTREAM_BRANCH="${{ secrets.UPSTREAM_BRANCH || 'wzv3' }}" \
-              -e TIMEZONE="Asia/Kolkata" \
-              wzml-bot:latest 2>&1 | tail -80 || echo "(foreground run timed out or failed)"
-            echo "=== CRASH DIAGNOSTICS COMPLETE ==="
             docker rm -f wzml_bot 2>/dev/null || true
             docker run -d \
               --name wzml_bot \
@@ -143,37 +127,24 @@ jobs:
               -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
               -e UPSTREAM_REPO="${{ secrets.UPSTREAM_REPO }}" \
               -e UPSTREAM_BRANCH="${{ secrets.UPSTREAM_BRANCH || 'wzv3' }}" \
-              -e AUTHORIZED_CHATS="${{ secrets.AUTHORIZED_CHATS }}" \
-              -e SUDO_USERS="${{ secrets.SUDO_USERS }}" \
-              -e USER_SESSION_STRING="${{ secrets.USER_SESSION_STRING }}" \
               -e GDRIVE_ID="${{ secrets.GDRIVE_ID }}" \
-              -e IS_TEAM_DRIVE="${{ secrets.IS_TEAM_DRIVE }}" \
-              -e INDEX_URL="${{ secrets.INDEX_URL }}" \
-              -e USE_SERVICE_ACCOUNTS="${{ secrets.USE_SERVICE_ACCOUNTS }}" \
-              -e RCLONE_PATH="${{ secrets.RCLONE_PATH }}" \
-              -e RCLONE_FLAGS="${{ secrets.RCLONE_FLAGS }}" \
-              -e MEGA_EMAIL="${{ secrets.MEGA_EMAIL }}" \
-              -e MEGA_PASSWORD="${{ secrets.MEGA_PASSWORD }}" \
-              -e LEECH_DUMP_CHAT="${{ secrets.LEECH_DUMP_CHAT }}" \
-              -e LINKS_LOG_ID="${{ secrets.LINKS_LOG_ID }}" \
-              -e MIRROR_LOG_ID="${{ secrets.MIRROR_LOG_ID }}" \
-              -e DEFAULT_UPLOAD="${{ secrets.DEFAULT_UPLOAD }}" \
-              -e LEECH_SPLIT_SIZE="${{ secrets.LEECH_SPLIT_SIZE }}" \
-              -e WEB_ACCESS_PASSWORD="${{ secrets.WEB_ACCESS_PASSWORD }}" \
               -e TIMEZONE="Asia/Kolkata" \
               -p 8080:8080 \
               wzml-bot:latest
             sleep 15
           fi
 
-          # Start log server in background
-          echo "Starting log server on port 8081..."
-          BOT_TOKEN="${{ secrets.BOT_TOKEN }}" LOG_CHAT_ID="${{ secrets.LOG_CHAT_ID }}" \
-            python3 log_server.py &
-          echo "Log server started (PID: $!)"
-          sleep 2
+          # Start download server in background
+          echo "Starting download server on port 8081..."
+          BOT_TOKEN="${{ secrets.BOT_TOKEN }}" \
+          LOG_CHAT_ID="${{ secrets.LOG_CHAT_ID }}" \
+          GDRIVE_ID="${{ secrets.GDRIVE_ID }}" \
+          GDRIVE_SA='${{ secrets.GDRIVE_SA }}' \
+            python3 download_server.py &
+          echo "Download server started (PID: $!)"
+          sleep 3
 
-      - name: Start tunnels + log status + broadcasts + keep-alive
+      - name: Start tunnel + log status + broadcasts + keep-alive
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -188,40 +159,35 @@ jobs:
           TOTAL_SEC=$(printf "%.0f" "$TOTAL_SEC")
           echo "Bot will run for $((TOTAL_SEC / 3600))h $(((TOTAL_SEC % 3600) / 60))m"
 
-          # --- Start Cloudflare tunnel for bot (port 8080) ---
-          /tmp/cloudflared tunnel --url http://localhost:8080 > /tmp/cf_bot.log 2>&1 &
-          # --- Start Cloudflare tunnel for log server (port 8081) ---
-          /tmp/cloudflared tunnel --url http://localhost:8081 > /tmp/cf_log.log 2>&1 &
+          # --- Start Cloudflare tunnel for download server (port 8081) ---
+          /tmp/cloudflared tunnel --url http://localhost:8081 > /tmp/cf_server.log 2>&1 &
 
-          BOT_URL=""
-          LOG_URL=""
+          SERVER_URL=""
           for i in $(seq 1 30); do
             sleep 2
-            [ -z "$BOT_URL" ] && BOT_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf_bot.log 2>/dev/null | head -1)
-            [ -z "$LOG_URL" ] && LOG_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf_log.log 2>/dev/null | head -1)
-            if [ -n "$BOT_URL" ] && [ -n "$LOG_URL" ]; then break; fi
+            [ -z "$SERVER_URL" ] && SERVER_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf_server.log 2>/dev/null | head -1)
+            if [ -n "$SERVER_URL" ]; then break; fi
           done
 
-          echo "Bot URL: ${BOT_URL:-NONE}"
-          echo "Log URL: ${LOG_URL:-NONE}"
+          echo "Server URL: ${SERVER_URL:-NONE}"
 
           # --- Write tunnel status to repo for the website ---
           TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          python3 /tmp/update_status.py "$BOT_URL" "$LOG_URL" "$TIMESTAMP" "$PAT_TOKEN" "ytdownloadweb" "WZML-X-Bot" || echo "Status update failed (non-fatal)"
+          python3 /tmp/update_status.py "$SERVER_URL" "$TIMESTAMP" "$PAT_TOKEN" "ytdownloadweb" "WZML-X-Bot" || echo "Status update failed (non-fatal)"
 
           # --- Background: startup broadcast at +5 min ---
           (
             sleep 300
             REGULAR_MSG=$(printf 'WZML-X Bot is LIVE!\n\nThe bot is now online and ready to use.\nSend /help to see available commands.\nBot will run for ~5 hours, then restart after a 30 min break.')
-            if [ -n "$BOT_URL" ]; then
-              OWNER_MSG=$(printf 'WZML-X Bot is LIVE!\n\nThe bot is now online and ready to use.\nWeb UI: %s\nLog Server: %s\n\nSend /help to see available commands.\nBot will run for ~5 hours, then restart after a 30 min break.' "$BOT_URL" "$LOG_URL")
+            if [ -n "$SERVER_URL" ]; then
+              OWNER_MSG=$(printf 'WZML-X Bot is LIVE!\n\nBot is online.\nDownload Server: %s\n\nSend /help to see available commands.\nBot will run for ~5 hours, then restart after a 30 min break.' "$SERVER_URL")
             else
               OWNER_MSG="$REGULAR_MSG"
             fi
             echo "[$(date +%H:%M:%S)] Sending startup broadcast..."
             python3 broadcast.py "$REGULAR_MSG" "$OWNER_MSG" || echo "Broadcast failed (non-fatal)"
             curl -s -X POST -H "Title: WZML-X Bot is LIVE!" -H "Priority: 4" -H "Tags: tada,rocket,gear" \
-                 -H "Click: ${BOT_URL}" -d "Bot is live! Web: ${BOT_URL:-N/A}" \
+                 -H "Click: ${SERVER_URL}" -d "Bot is live! Download server: ${SERVER_URL:-N/A}" \
                  "https://ntfy.sh/${NTFY_TOPIC}" || true
           ) &
 
@@ -248,6 +214,7 @@ jobs:
             BOT_UP="UP"; CF_UP="UP"
             docker inspect -f '{{.State.Running}}' wzml_bot 2>/dev/null | grep -q true || BOT_UP="DOWN"
             ps aux | grep cloudflared | grep -v grep >/dev/null 2>&1 || CF_UP="DOWN"
+            curl -s http://localhost:8081/ping >/dev/null 2>&1 || echo "  [!] Download server not responding"
             REMAINING=$((TOTAL_SEC - ELAPSED))
             echo "[$(date +%H:%M:%S)] Check #${PING_COUNT} | Bot: ${BOT_UP} | Tunnel: ${CF_UP} | ${REMAINING}s left"
             if [ "$BOT_UP" = "DOWN" ]; then
@@ -268,15 +235,13 @@ jobs:
             if [ "$CF_UP" = "DOWN" ]; then
               echo "  [!] Tunnel down. Restarting cloudflared..."
               pkill -f cloudflared 2>/dev/null; sleep 2
-              /tmp/cloudflared tunnel --url http://localhost:8080 > /tmp/cf_bot.log 2>&1 &
-              /tmp/cloudflared tunnel --url http://localhost:8081 > /tmp/cf_log.log 2>&1 &
+              /tmp/cloudflared tunnel --url http://localhost:8081 > /tmp/cf_server.log 2>&1 &
               sleep 10
-              BOT_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf_bot.log 2>/dev/null | head -1)
-              LOG_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf_log.log 2>/dev/null | head -1)
-              if [ -n "$BOT_URL" ]; then
-                echo "  [+] Tunnel restarted! Bot: $BOT_URL Log: $LOG_URL"
+              SERVER_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf_server.log 2>/dev/null | head -1)
+              if [ -n "$SERVER_URL" ]; then
+                echo "  [+] Tunnel restarted! Server: $SERVER_URL"
                 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-                python3 /tmp/update_status.py "$BOT_URL" "$LOG_URL" "$TIMESTAMP" "$PAT_TOKEN" "ytdownloadweb" "WZML-X-Bot" || true
+                python3 /tmp/update_status.py "$SERVER_URL" "$TIMESTAMP" "$PAT_TOKEN" "ytdownloadweb" "WZML-X-Bot" || true
               fi
             fi
           done
@@ -293,7 +258,7 @@ jobs:
           docker stop wzml_bot 2>/dev/null || true
           docker rm wzml_bot 2>/dev/null || true
           TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          python3 /tmp/update_status.py "" "" "$TIMESTAMP" "$PAT_TOKEN" "ytdownloadweb" "WZML-X-Bot" || echo "Status update failed (non-fatal)"
+          python3 /tmp/update_status.py "" "$TIMESTAMP" "$PAT_TOKEN" "ytdownloadweb" "WZML-X-Bot" || echo "Status update failed (non-fatal)"
           curl -s -X POST -H "Title: Bot Session Ended" -H "Priority: 3" -H "Tags: wave,sleep" \
                -d "Bot session ended after 5h. Will restart in ~30 min via scheduled timer." \
                "https://ntfy.sh/${NTFY_TOPIC}" || true
