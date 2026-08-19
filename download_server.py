@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """
-download_server.py — Full-featured download server with auth, tiers, admin, GDrive upload.
+download_server.py v4 — Full-featured download server with auth, tiers, admin, GDrive upload.
+Changes from v3:
+  - Guest downloads (no login required) with IP-based rate limiting (3 per 24h)
+  - Rolling 24h window (not midnight reset) for all download quotas
+  - Masked IP addresses (SHA-256 hash with salt) — privacy-preserving
+  - Fixed CORS: echoes specific Origin header instead of * (critical for credentials)
+  - Fixed cookies: SameSite=None instead of Lax (cross-origin auth works now)
+  - Free tier daily_limit changed from 3 to 5
+  - New endpoint: /api/guest-quota — returns remaining guest downloads
 Env: BOT_TOKEN, LOG_CHAT_ID, GDRIVE_ID, GDRIVE_SA, DATABASE_URL,
      ADMIN_USERNAME, ADMIN_PASSWORD,
-     BREVO_API_KEY, BREVO_SENDER_EMAIL, OWNER_EMAIL
+     BREVO_API_KEY, BREVO_SENDER_EMAIL, OWNER_EMAIL, IP_SALT (optional)
 Port: 8081
 """
 import os, json, time, uuid, hashlib, secrets, threading, subprocess, tempfile, shutil
@@ -23,15 +31,19 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "")
 BREVO_SENDER_EMAIL = os.environ.get("BREVO_SENDER_EMAIL", "")
 OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "")
+IP_SALT = os.environ.get("IP_SALT", "ytdl_salt_2024_secure")
 PORT = 8081
+GUEST_DAILY_LIMIT = 3
 
 TIERS = {
-    "free":    {"max_bytes": 1073741824,    "daily_limit": 3,    "label": "Free"},
+    "free":    {"max_bytes": 1073741824,    "daily_limit": 5,    "label": "Free"},
     "bronze":  {"max_bytes": 2147483648,    "daily_limit": 10,   "label": "Bronze"},
     "silver":  {"max_bytes": 5368709120,    "daily_limit": 25,   "label": "Silver"},
     "gold":    {"max_bytes": 10737418240,   "daily_limit": 50,   "label": "Gold"},
     "supreme": {"max_bytes": None,          "daily_limit": None, "label": "Supreme"},
 }
+
+GUEST_TIER = {"max_bytes": 1073741824, "daily_limit": GUEST_DAILY_LIMIT, "label": "Guest"}
 
 jobs = {}
 jobs_lock = threading.Lock()
@@ -52,10 +64,17 @@ def get_db():
             _db.sessions.create_index("token", unique=True)
             _db.users.create_index("username", unique=True)
             _db.downloads.create_index("username")
+            _db.downloads.create_index("ip_hash")
+            _db.downloads.create_index("created_at")
+            _db.logs.create_index("created_at")
             print("[INFO] MongoDB connected")
         except Exception as e:
             print(f"[ERROR] MongoDB: {e}"); _db = None
         return _db
+
+def mask_ip(ip):
+    """Hash an IP address with salt for privacy-preserving storage."""
+    return hashlib.sha256((ip + IP_SALT).encode()).hexdigest()[:32]
 
 def hash_pw(pw):
     salt = os.urandom(16)
@@ -102,9 +121,15 @@ def create_session(db, username, is_admin=False):
     db.sessions.insert_one({"token": tok, "username": username, "is_admin": is_admin, "expires_at": exp})
     return tok, exp
 
-def count_downloads_today(db, username):
-    start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    return db.downloads.count_documents({"username": username, "created_at": {"$gte": start}})
+def count_downloads_24h(db, username):
+    """Rolling 24h window: count downloads in the last 24 hours."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    return db.downloads.count_documents({"username": username, "created_at": {"$gte": cutoff}})
+
+def count_guest_downloads_24h(db, ip_hash):
+    """Rolling 24h window for guest (IP-based) downloads."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    return db.downloads.count_documents({"ip_hash": ip_hash, "created_at": {"$gte": cutoff}})
 
 def send_tg(text):
     if not BOT_TOKEN or not LOG_CHAT_ID: return
@@ -192,7 +217,7 @@ def upload_to_gdrive(filepath, filename):
         print(f"[GDrive] {e}")
         return None
 
-def process_download(job_id, url, username, tier):
+def process_download(job_id, url, username, tier, ip_hash=None):
     with jobs_lock:
         jobs[job_id]["status"] = "downloading"
         jobs[job_id]["message"] = "Downloading..."
@@ -251,11 +276,19 @@ def process_download(job_id, url, username, tier):
                 jobs[job_id]["filesize"] = fsize
         db = get_db()
         if db:
-            db.downloads.insert_one({"username": username, "url": url, "title": files[0], "platform": detect_platform(url), "size_bytes": fsize, "drive_link": link, "status": "completed", "created_at": datetime.now(timezone.utc)})
+            dl_record = {
+                "username": username, "url": url, "title": files[0],
+                "platform": detect_platform(url), "size_bytes": fsize,
+                "drive_link": link, "status": "completed",
+                "created_at": datetime.now(timezone.utc)
+            }
+            if ip_hash: dl_record["ip_hash"] = ip_hash
+            db.downloads.insert_one(dl_record)
         ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        user_display = f"{username} ({tier})" if username != "guest" else f"Guest (IP: {ip_hash[:8] if ip_hash else 'unknown'}...)"
         notify("Download Complete",
-               tg_text=f"✅ Download Complete\nUser: {username} ({tier})\nFile: {files[0]}\nSize: {fsize/1048576:.1f} MB\nURL: {url[:80]}\nGDrive: {link or 'N/A'}\nTime: {ts} UTC",
-               email_body=f"A download has completed.\n\nUser: {username} ({tier})\nFile: {files[0]}\nSize: {fsize/1048576:.1f} MB\nURL: {url[:80]}\nGDrive: {link or 'N/A'}\nTime: {ts} UTC")
+               tg_text=f"✅ Download Complete\nUser: {user_display}\nFile: {files[0]}\nSize: {fsize/1048576:.1f} MB\nURL: {url[:80]}\nGDrive: {link or 'N/A'}\nTime: {ts} UTC",
+               email_body=f"A download has completed.\n\nUser: {user_display}\nFile: {files[0]}\nSize: {fsize/1048576:.1f} MB\nURL: {url[:80]}\nGDrive: {link or 'N/A'}\nTime: {ts} UTC")
     except subprocess.TimeoutExpired:
         with jobs_lock:
             if job_id in jobs:
@@ -274,17 +307,36 @@ def fmt_size(b):
     if b > 1073741824: return f"{b/1073741824:.1f} GB"
     return f"{b/1048576:.1f} MB"
 
+# Cookie strings — SameSite=None for cross-origin (GitHub Pages -> Cloudflare tunnel)
+USER_COOKIE = "__Host-user_session={}; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=86400"
+ADMIN_COOKIE = "__Host-admin_session={}; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=86400"
+CLEAR_COOKIE = "__Host-user_session=; Path=/; Max-Age=0; SameSite=None; Secure; __Host-admin_session=; Path=/; Max-Age=0; SameSite=None; Secure"
+
 class Handler(BaseHTTPRequestHandler):
     def _cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # CRITICAL FIX: Must echo specific Origin, not *, when credentials are included
+        origin = self.headers.get("Origin", "")
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        else:
+            self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Cookie")
         self.send_header("Access-Control-Allow-Credentials", "true")
+        self.send_header("Access-Control-Max-Age", "86400")
     def _json(self, code, data, cookie=None):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self._cors()
-        if cookie: self.send_header("Set-Cookie", cookie)
+        if cookie:
+            # Support multiple Set-Cookie headers
+            for c in cookie.split("; __Host"):
+                c = c.strip()
+                if c:
+                    if not c.startswith("__Host"):
+                        c = "__Host" + c
+                    self.send_header("Set-Cookie", c)
         self.end_headers()
         self.wfile.write(json.dumps(data, default=str).encode())
     def do_OPTIONS(self):
@@ -308,8 +360,15 @@ class Handler(BaseHTTPRequestHandler):
             u, _ = get_session_user(db, self.headers)
             if not u: self._json(401, {"error":"not authenticated"}); return
             tier = u.get("tier", "free")
-            today_dl = count_downloads_today(db, u["username"])
+            today_dl = count_downloads_24h(db, u["username"])
             self._json(200, {"username": u["username"], "tier": tier, "isAdmin": u.get("is_admin", False), "downloadsToday": today_dl, "maxSize": TIERS[tier]["max_bytes"], "dailyLimit": TIERS[tier]["daily_limit"], "botAccess": tier == "supreme", "banned": u.get("banned", False)})
+        elif path == "/api/guest-quota":
+            if not db: self._json(200, {"remaining": GUEST_DAILY_LIMIT, "limit": GUEST_DAILY_LIMIT, "tier": "guest"}); return
+            ip = self.client_address[0] if self.client_address else "unknown"
+            iph = mask_ip(ip)
+            used = count_guest_downloads_24h(db, iph)
+            remaining = max(0, GUEST_DAILY_LIMIT - used)
+            self._json(200, {"remaining": remaining, "limit": GUEST_DAILY_LIMIT, "used": used, "tier": "guest"})
         elif path == "/api/history":
             if not db: self._json(500, {"error":"DB unavailable"}); return
             u, _ = get_session_user(db, self.headers)
@@ -320,13 +379,14 @@ class Handler(BaseHTTPRequestHandler):
             if not db: self._json(500, {"error":"DB unavailable"}); return
             admin = get_session_admin(db, self.headers)
             if not admin: self._json(403, {"error":"admin only"}); return
-            users = list(db.users.find({}, {"_id":0}).limit(500))
+            users = list(db.users.find({}, {"_id":0,"password":0}).limit(500))
             self._json(200, users)
         elif path == "/api/admin/stats":
             if not db: self._json(500, {"error":"DB unavailable"}); return
             admin = get_session_admin(db, self.headers)
             if not admin: self._json(403, {"error":"admin only"}); return
-            self._json(200, {"totalUsers": db.users.count_documents({}), "totalDownloads": db.downloads.count_documents({}), "todayDownloads": db.downloads.count_documents({"created_at": {"$gte": datetime.now(timezone.utc).replace(hour=0,minute=0,second=0,microsecond=0)}}), "activeSessions": db.sessions.count_documents({})})
+            cutoff24 = datetime.now(timezone.utc) - timedelta(hours=24)
+            self._json(200, {"totalUsers": db.users.count_documents({}), "totalDownloads": db.downloads.count_documents({}), "todayDownloads": db.downloads.count_documents({"created_at": {"$gte": cutoff24}}), "activeSessions": db.sessions.count_documents({})})
         elif path == "/api/admin/logs":
             if not db: self._json(500, {"error":"DB unavailable"}); return
             admin = get_session_admin(db, self.headers)
@@ -357,7 +417,7 @@ class Handler(BaseHTTPRequestHandler):
                 notify("New User Registration",
                        tg_text=f"🆕 New Registration\nUser: {uname}\nTier: Free\nTime: {ts} UTC",
                        email_body=f"A new user has registered.\n\nUsername: {uname}\nTier: Free\nTime: {ts} UTC")
-                self._json(200, {"success": True, "username": uname, "tier": "free"}, cookie=f"__Host-user_session={tok}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=86400")
+                self._json(200, {"success": True, "username": uname, "tier": "free"}, cookie=USER_COOKIE.format(tok))
             elif action == "signin":
                 uname = body.get("username","").strip().lower()
                 pw = body.get("password","")
@@ -370,7 +430,7 @@ class Handler(BaseHTTPRequestHandler):
                 notify("User Login",
                        tg_text=f"🔑 Login\nUser: {uname}\nTier: {u.get('tier','free')}\nTime: {ts} UTC",
                        email_body=f"User logged in.\n\nUsername: {uname}\nTier: {u.get('tier','free')}\nTime: {ts} UTC")
-                self._json(200, {"success": True, "username": uname, "tier": u.get("tier","free"), "isAdmin": u.get("is_admin", False)}, cookie=f"__Host-user_session={tok}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=86400")
+                self._json(200, {"success": True, "username": uname, "tier": u.get("tier","free"), "isAdmin": u.get("is_admin", False)}, cookie=USER_COOKIE.format(tok))
             elif action == "admin_login":
                 au = body.get("username","").strip().lower()
                 pw = body.get("password","")
@@ -381,36 +441,57 @@ class Handler(BaseHTTPRequestHandler):
                 notify("Admin Login Alert",
                        tg_text=f"🛡️ Admin Login\nTime: {ts} UTC",
                        email_body=f"Admin login detected.\n\nTime: {ts} UTC\nUsername: {au}")
-                self._json(200, {"success": True}, cookie=f"__Host-admin_session={tok}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=86400")
+                self._json(200, {"success": True}, cookie=ADMIN_COOKIE.format(tok))
             elif action == "logout":
                 cookies = parse_cookies(self.headers.get("Cookie",""))
                 for ck in ["__Host-user_session","__Host-admin_session","user_session","admin_session"]:
                     if cookies.get(ck) and db: db.sessions.delete_one({"token": cookies[ck]})
-                self._json(200, {"success": True}, cookie="__Host-user_session=; Path=/; Max-Age=0; __Host-admin_session=; Path=/; Max-Age=0")
+                self._json(200, {"success": True}, cookie=CLEAR_COOKIE)
             else:
                 self._json(400, {"error":"invalid action"})
         elif path == "/api/download":
             if not db: self._json(500, {"error":"DB unavailable"}); return
-            u, _ = get_session_user(db, self.headers)
-            if not u: self._json(401, {"error":"Please login first"}); return
-            if u.get("banned"): self._json(403, {"error":"Account banned"}); return
             url = body.get("url","").strip()
             if not url or len(url) < 10: self._json(400, {"error":"valid URL required"}); return
-            tier = u.get("tier", "free")
-            tcfg = TIERS.get(tier, TIERS["free"])
-            today_dl = count_downloads_today(db, u["username"])
-            if tcfg["daily_limit"] is not None and today_dl >= tcfg["daily_limit"]:
-                self._json(429, {"error":f"Daily limit reached ({tcfg['daily_limit']}/day). Resets at midnight UTC."}); return
+
+            u, _ = get_session_user(db, self.headers)
+            ip = self.client_address[0] if self.client_address else "unknown"
+            iph = mask_ip(ip)
+
+            if u:
+                # Authenticated user
+                if u.get("banned"): self._json(403, {"error":"Account banned"}); return
+                tier = u.get("tier", "free")
+                tcfg = TIERS.get(tier, TIERS["free"])
+                dl_count = count_downloads_24h(db, u["username"])
+                if tcfg["daily_limit"] is not None and dl_count >= tcfg["daily_limit"]:
+                    self._json(429, {"error":f"Daily limit reached ({tcfg['daily_limit']} per 24h). Your oldest download will free up a slot after 24 hours. Upgrade at t.me/DJ_Hackrr for more."}); return
+                username = u["username"]
+                ip_hash_for_record = None  # Don't track IP for logged-in users
+            else:
+                # Guest user — IP-based rate limiting
+                tier = "guest"
+                tcfg = GUEST_TIER
+                guest_count = count_guest_downloads_24h(db, iph)
+                if guest_count >= GUEST_DAILY_LIMIT:
+                    self._json(429, {"error":f"Guest limit reached ({GUEST_DAILY_LIMIT} per 24h). Sign up for free to get 5 downloads/day, or upgrade at t.me/DJ_Hackrr on Telegram!"}); return
+                username = "guest"
+                ip_hash_for_record = iph
+
+            # Probe video for size check
             title, vsize = probe_video(url)
             if vsize and tcfg["max_bytes"] is not None and vsize > tcfg["max_bytes"]:
-                self._json(413, {"error":f"File too large ({fmt_size(vsize)}). Your {TIERS[tier]['label']} tier limit is {fmt_size(tcfg['max_bytes'])}. Upgrade to download larger files."}); return
+                self._json(413, {"error":f"File too large ({fmt_size(vsize)}). Your {tcfg['label']} tier limit is {fmt_size(tcfg['max_bytes'])}. Upgrade to download larger files."}); return
+
             jid = str(uuid.uuid4())[:8]
             with jobs_lock:
                 jobs[jid] = {"status":"queued","message":"Queued...","progress":0,"platform":detect_platform(url),"gdrive_link":"","filename":"","filesize":0,"created_at":time.time()}
-            t = threading.Thread(target=process_download, args=(jid, url, u["username"], tier), daemon=True)
+            t = threading.Thread(target=process_download, args=(jid, url, username, tier, ip_hash_for_record), daemon=True)
             t.start()
-            send_tg(f"⬇️ Download Request\nUser: {u['username']} ({tier})\nPlatform: {detect_platform(url)}\nURL: {url[:100]}")
-            self._json(200, {"job_id": jid, "status": "queued"})
+
+            user_label = f"{username} ({tier})" if username != "guest" else f"Guest (IP: {iph[:8]}...)"
+            send_tg(f"⬇️ Download Request\nUser: {user_label}\nPlatform: {detect_platform(url)}\nURL: {url[:100]}")
+            self._json(200, {"job_id": jid, "status": "queued", "tier": tier})
         elif path == "/api/admin/set-tier":
             if not db: self._json(500, {"error":"DB unavailable"}); return
             admin = get_session_admin(db, self.headers)
@@ -446,26 +527,29 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/log":
             event = body.get("event","unknown")
             ip = self.client_address[0] if self.client_address else "unknown"
+            iph = mask_ip(ip)
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
             if event == "visit":
                 notify("New Website Visit",
-                       tg_text=f"👁️ New Visit\nTime: {ts} UTC\nIP: {ip}",
-                       email_body=f"New website visit detected.\n\nTime: {ts} UTC\nIP: {ip}")
+                       tg_text=f"👁️ New Visit\nTime: {ts} UTC\nIP: {iph[:12]}...(masked)",
+                       email_body=f"New website visit detected.\n\nTime: {ts} UTC\nIP (masked): {iph[:12]}...")
             if db:
-                db.logs.insert_one({"event": event, "ip": ip, "created_at": datetime.now(timezone.utc)})
+                db.logs.insert_one({"event": event, "ip": iph[:16], "created_at": datetime.now(timezone.utc)})
             self._json(200, {"ok": True})
         else:
             self._json(404, {"error":"not found"})
     def log_message(self, *a): pass
 
 if __name__ == "__main__":
-    print(f"Download server on :{PORT}")
+    print(f"Download server v4 on :{PORT}")
     print(f"  BOT_TOKEN: {'set' if BOT_TOKEN else 'MISSING'}")
     print(f"  GDRIVE: {'set' if GDRIVE_SA else 'MISSING'}")
     print(f"  DATABASE: {'set' if DATABASE_URL else 'MISSING'}")
     print(f"  BREVO: {'set' if BREVO_API_KEY else 'MISSING'}")
     print(f"  ADMIN_USERNAME: {ADMIN_USERNAME}")
+    print(f"  Guest limit: {GUEST_DAILY_LIMIT}/24h")
+    print(f"  Free limit: {TIERS['free']['daily_limit']}/24h")
     notify("Download Server Started",
-           tg_text="🟢 Download Server Started\nReady for downloads.",
-           email_body="The download server has started and is ready for downloads.")
+           tg_text="🟢 Download Server v4 Started\nGuest downloads enabled (3/24h)\nRolling 24h rate limiting\nMasked IPs\nReady for downloads.",
+           email_body="The download server v4 has started.\n\nFeatures:\n- Guest downloads enabled (3 per 24h)\n- Rolling 24h rate limiting\n- Masked IPs (SHA-256)\n- Fixed CORS for cross-origin auth\n\nReady for downloads.")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
