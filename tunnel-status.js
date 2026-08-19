@@ -1,1 +1,1 @@
-window.tunnelStatus = {"status": "online", "url": "https://instrument-travis-return-personality.trycloudflare.com", "updated": "2026-08-19T13:19:34Z"};
+window.tunnelStatus = {"status": "offline", "url": "", "updated": "2026-08-19T17:46:01Z"};
