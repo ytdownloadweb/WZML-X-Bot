@@ -7,13 +7,9 @@ them as messages to a Telegram group using the Bot API.
 Listens on port 8081.
 
 Endpoints:
-  POST /log        - forward a log message to TG group
+  GET  /           - simple HTML status page (so root URL doesn't show error)
   GET  /ping       - health check (returns {"ok": true})
-
-The website sends logs like:
-  - User visited the page (with referrer, country hint via IP)
-  - User clicked Download (with the URL they pasted)
-  - User opened the download manager
+  POST /log        - forward a log message to TG group
 """
 import json
 import os
@@ -27,6 +23,15 @@ LOG_CHAT_ID = os.environ.get("LOG_CHAT_ID", "")
 PORT = int(os.environ.get("LOG_PORT", "8081"))
 
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+LANDING_HTML = """<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Log Server</title></head>
+<body style="font-family:monospace;background:#0f0f0f;color:#22c55e;padding:40px;text-align:center;">
+<h1>Log Server Running</h1>
+<p>Endpoints:</p>
+<p>POST /log - send a log event</p>
+<p>GET /ping - health check</p>
+</body></html>"""
 
 
 def send_tg(text, parse_mode="HTML"):
@@ -71,6 +76,12 @@ class LogHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/ping":
             self._send_json(200, {"ok": True, "ts": int(time.time())})
+        elif path == "/" or path == "":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self._cors()
+            self.end_headers()
+            self.wfile.write(LANDING_HTML.encode())
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -91,6 +102,7 @@ class LogHandler(BaseHTTPRequestHandler):
         event = data.get("event", "unknown")
         url = data.get("url", "")
         extra = data.get("extra", "")
+        platform = data.get("platform", "")
         ip = self.client_address[0] if self.client_address else "unknown"
         ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
@@ -99,9 +111,10 @@ class LogHandler(BaseHTTPRequestHandler):
             if extra:
                 msg += f"\n{extra}"
         elif event == "download":
-            msg = f"\u2b07\ufe0f <b>Download Request</b>\n\nTime: {ts} UTC\nIP: <code>{ip}</code>\nURL: <code>{url}</code>"
-            if extra:
-                msg += f"\n{extra}"
+            msg = f"\u2b07\ufe0f <b>Download Request</b>\n\nTime: {ts} UTC\nIP: <code>{ip}</code>"
+            if platform:
+                msg += f"\nPlatform: {platform}"
+            msg += f"\nURL: <code>{url}</code>"
         elif event == "open_manager":
             msg = f"\U0001F517 <b>Opened Download Manager</b>\n\nTime: {ts} UTC\nIP: <code>{ip}</code>"
             if url:
@@ -114,7 +127,7 @@ class LogHandler(BaseHTTPRequestHandler):
                 msg += f"\n{extra}"
 
         ok = send_tg(msg)
-        print(f"[{ts}] event={event} ip={ip} url={url[:60]} tg={'ok' if ok else 'fail'}")
+        print(f"[{ts}] event={event} ip={ip} platform={platform} url={url[:60]} tg={'ok' if ok else 'fail'}")
         self._send_json(200, {"ok": True, "sent": ok})
 
     def log_message(self, *args):
