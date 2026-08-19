@@ -1,1 +1,1 @@
-window.tunnelStatus = {"status": "offline", "url": "", "logUrl": "", "updated": "2026-08-19T08:41:12Z"};
+window.tunnelStatus = {"status": "online", "url": "https://land-progressive-rational-trek.trycloudflare.com", "updated": "2026-08-19T11:10:15Z"};
