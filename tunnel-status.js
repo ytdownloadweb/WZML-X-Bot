@@ -1,1 +1,1 @@
-window.tunnelStatus = {"status": "offline", "url": "", "updated": "2026-08-19T11:56:00Z"};
+window.tunnelStatus = {"status": "online", "url": "https://dividend-serial-rolling-sensors.trycloudflare.com", "updated": "2026-08-19T11:58:18Z"};
