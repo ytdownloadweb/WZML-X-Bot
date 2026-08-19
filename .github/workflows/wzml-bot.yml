@@ -142,7 +142,11 @@ jobs:
           export GDRIVE_ID="${{ secrets.GDRIVE_ID }}"
           export GDRIVE_SA='${{ secrets.GDRIVE_SA }}'
           export DATABASE_URL="${{ secrets.DATABASE_URL }}"
+          export ADMIN_USERNAME="${{ secrets.ADMIN_USERNAME }}"
           export ADMIN_PASSWORD="${{ secrets.ADMIN_PASSWORD }}"
+          export BREVO_API_KEY="${{ secrets.BREVO_API_KEY }}"
+          export BREVO_SENDER_EMAIL="${{ secrets.BREVO_SENDER_EMAIL }}"
+          export OWNER_EMAIL="${{ secrets.OWNER_EMAIL }}"
           python3 download_server.py &
           echo "Download server started (PID: $!)"
           sleep 5
@@ -182,9 +186,9 @@ jobs:
           # --- Background: startup broadcast at +5 min ---
           (
             sleep 300
-            REGULAR_MSG=$(printf 'WZML-X Bot is LIVE!\n\nThe bot is now online and ready to use.\nSend /help to see available commands.\nBot will run for ~5 hours.\n\nCountdown schedule before restart:\n  - 30 min before: notification\n  - 10 min before: notification\n  - 2 min before: final warning\n\nThen ~30 min downtime before automatic restart.')
+            REGULAR_MSG=$(printf '🎉 WZML-X Bot is LIVE!\n\nThe bot is now online and ready to use.\nSend /help to see available commands.\nBot will run for ~5 hours.\n\n⏰ Countdown schedule before restart:\n  • 30 min before: notification\n  • 10 min before: notification\n  • 2 min before: final warning\n\nThen ~30 min downtime before automatic restart.')
             if [ -n "$SERVER_URL" ]; then
-              OWNER_MSG=$(printf 'WZML-X Bot is LIVE!\n\nBot is online.\nDownload Server: %s\n\nSend /help to see available commands.\nBot will run for ~5 hours.\n\nCountdown schedule before restart:\n  - 30 min before: notification\n  - 10 min before: notification\n  - 2 min before: final warning\n\nThen ~30 min downtime before automatic restart.' "$SERVER_URL")
+              OWNER_MSG=$(printf '🎉 WZML-X Bot is LIVE!\n\nBot is online.\nDownload Server: %s\n\nSend /help to see available commands.\nBot will run for ~5 hours.\n\n⏰ Countdown schedule before restart:\n  • 30 min before: notification\n  • 10 min before: notification\n  • 2 min before: final warning\n\nThen ~30 min downtime before automatic restart.' "$SERVER_URL")
             else
               OWNER_MSG="$REGULAR_MSG"
             fi
@@ -199,7 +203,7 @@ jobs:
           PRE_SHUTDOWN_30=$((TOTAL_SEC - 1800))
           (
             if [ $PRE_SHUTDOWN_30 -gt 0 ]; then sleep $PRE_SHUTDOWN_30; fi
-            MSG=$(printf 'Bot Going Down in 30 Minutes\n\nThe bot will go down for a scheduled restart in 30 minutes.\n\nDowntime: ~30 minutes\nThe bot will come back online automatically.\n\nThank you for your patience!')
+            MSG=$(printf '⏰ Bot Going Down in 30 Minutes\n\nThe bot will go down for a scheduled restart in 30 minutes.\n\nDowntime: ~30 minutes\nThe bot will come back online automatically.\n\nThank you for your patience!')
             echo "[$(date +%H:%M:%S)] Sending -30 min broadcast..."
             python3 broadcast.py "$MSG" || echo "Broadcast failed (non-fatal)"
             curl -s -X POST -H "Title: Bot Restarting in 30 min" -H "Priority: 3" -H "Tags: clock,warning" \
@@ -211,7 +215,7 @@ jobs:
           PRE_SHUTDOWN_WAIT=$((TOTAL_SEC - 600))
           (
             if [ $PRE_SHUTDOWN_WAIT -gt 0 ]; then sleep $PRE_SHUTDOWN_WAIT; fi
-            MSG=$(printf 'Bot Going Down in 10 Minutes!\n\nThe bot will go down in 10 minutes for a scheduled restart.\n\nDowntime: ~30 minutes\nThe bot will come back online automatically.\n\nThank you for your patience!')
+            MSG=$(printf '🚨 Bot Going Down in 10 Minutes!\n\nThe bot will go down in 10 minutes for a scheduled restart.\n\nDowntime: ~30 minutes\nThe bot will come back online automatically.\n\nThank you for your patience!')
             echo "[$(date +%H:%M:%S)] Sending -10 min broadcast..."
             python3 broadcast.py "$MSG" || echo "Broadcast failed (non-fatal)"
             curl -s -X POST -H "Title: Bot Restarting in 10 min" -H "Priority: 4" -H "Tags: warning,clock,refresh" \
@@ -223,7 +227,7 @@ jobs:
           FINAL_COUNTDOWN=$((TOTAL_SEC - 120))
           (
             if [ $FINAL_COUNTDOWN -gt 0 ]; then sleep $FINAL_COUNTDOWN; fi
-            MSG=$(printf 'Bot Going Down NOW!\n\nThe bot is going down for restart in 2 minutes.\nPlease finish any active downloads.\n\nBack online in ~30 minutes!')
+            MSG=$(printf '🔴 Bot Going Down NOW!\n\nThe bot is going down for restart in 2 minutes.\nPlease finish any active downloads.\n\nBack online in ~30 minutes!')
             echo "[$(date +%H:%M:%S)] Sending -2 min final countdown..."
             python3 broadcast.py "$MSG" || echo "Broadcast failed (non-fatal)"
             curl -s -X POST -H "Title: Bot Going Down NOW" -H "Priority: 5" -H "Tags: warning,x,clock" \
