@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 download_server.py — Full-featured download server with auth, tiers, admin, GDrive upload.
-Env: BOT_TOKEN, LOG_CHAT_ID, GDRIVE_ID, GDRIVE_SA, DATABASE_URL, ADMIN_PASSWORD
+Env: BOT_TOKEN, LOG_CHAT_ID, GDRIVE_ID, GDRIVE_SA, DATABASE_URL,
+     ADMIN_USERNAME, ADMIN_PASSWORD,
+     BREVO_API_KEY, BREVO_SENDER_EMAIL, OWNER_EMAIL
 Port: 8081
 """
 import os, json, time, uuid, hashlib, secrets, threading, subprocess, tempfile, shutil
@@ -16,7 +18,11 @@ LOG_CHAT_ID = os.environ.get("LOG_CHAT_ID", "")
 GDRIVE_ID = os.environ.get("GDRIVE_ID", "")
 GDRIVE_SA = os.environ.get("GDRIVE_SA", "")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "")
+BREVO_SENDER_EMAIL = os.environ.get("BREVO_SENDER_EMAIL", "")
+OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "")
 PORT = 8081
 
 TIERS = {
@@ -110,6 +116,39 @@ def send_tg(text):
     except Exception as e:
         print(f"[TG] {e}")
 
+def send_email(subject, body_text):
+    """Send notification email to owner via Brevo (sendinblue) API."""
+    if not BREVO_API_KEY or not BREVO_SENDER_EMAIL or not OWNER_EMAIL:
+        return False
+    try:
+        payload = json.dumps({
+            "sender": {"email": BREVO_SENDER_EMAIL, "name": "YTDownload Server"},
+            "to": [{"email": OWNER_EMAIL}],
+            "subject": subject,
+            "textContent": body_text
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.brevo.com/v3/smtp/email",
+            data=payload,
+            method="POST"
+        )
+        req.add_header("api-key", BREVO_API_KEY)
+        req.add_header("Content-Type", "application/json")
+        resp = urllib.request.urlopen(req, timeout=15)
+        print(f"[BREVO] Email sent: {subject} (status {resp.status})")
+        return True
+    except Exception as e:
+        print(f"[BREVO] Email failed: {e}")
+        return False
+
+def notify(subject, tg_text=None, email_body=None):
+    """Send both TG message and Brevo email notification. Falls back to either."""
+    if tg_text:
+        send_tg(tg_text)
+    if email_body is None:
+        email_body = tg_text or subject
+    send_email(subject, email_body)
+
 def detect_platform(url):
     u = url.lower()
     for domains, name in [(["youtube.com","youtu.be","m.youtube.com"],"YouTube"),(["instagram.com","instagr.am"],"Instagram"),(["tiktok.com"],"TikTok"),(["facebook.com","fb.watch","m.facebook.com"],"Facebook"),(["twitter.com","x.com","t.co"],"Twitter/X"),(["reddit.com","redd.it"],"Reddit"),(["vimeo.com"],"Vimeo"),(["dailymotion.com","dai.ly"],"Dailymotion"),(["soundcloud.com"],"SoundCloud"),(["pinterest.com","pin.it"],"Pinterest"),(["streamable.com"],"Streamable"),(["twitch.tv"],"Twitch")]:
@@ -182,7 +221,10 @@ def process_download(job_id, url, username, tier):
                 if job_id in jobs:
                     jobs[job_id]["status"] = "error"
                     jobs[job_id]["message"] = "Download failed. Video may be private or unsupported."
-            send_tg(f"Download Failed\nUser: {username}\nURL: {url[:100]}")
+            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+            notify("Download Failed",
+                   tg_text=f"❌ Download Failed\nUser: {username}\nURL: {url[:100]}\nTime: {ts} UTC",
+                   email_body=f"A download has failed.\n\nUser: {username}\nURL: {url[:100]}\nTime: {ts} UTC")
             return
         files = [f for f in os.listdir(tmpdir) if not f.endswith((".part",".ytdl"))]
         if not files:
@@ -210,7 +252,10 @@ def process_download(job_id, url, username, tier):
         db = get_db()
         if db:
             db.downloads.insert_one({"username": username, "url": url, "title": files[0], "platform": detect_platform(url), "size_bytes": fsize, "drive_link": link, "status": "completed", "created_at": datetime.now(timezone.utc)})
-        send_tg(f"Download Complete\nUser: {username} ({tier})\nFile: {files[0]}\nSize: {fsize/1048576:.1f} MB\nURL: {url[:80]}\nGDrive: {link or 'N/A'}")
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        notify("Download Complete",
+               tg_text=f"✅ Download Complete\nUser: {username} ({tier})\nFile: {files[0]}\nSize: {fsize/1048576:.1f} MB\nURL: {url[:80]}\nGDrive: {link or 'N/A'}\nTime: {ts} UTC",
+               email_body=f"A download has completed.\n\nUser: {username} ({tier})\nFile: {files[0]}\nSize: {fsize/1048576:.1f} MB\nURL: {url[:80]}\nGDrive: {link or 'N/A'}\nTime: {ts} UTC")
     except subprocess.TimeoutExpired:
         with jobs_lock:
             if job_id in jobs:
@@ -308,7 +353,10 @@ class Handler(BaseHTTPRequestHandler):
                 if db.users.find_one({"username": uname}): self._json(409, {"error":"Username taken"}); return
                 db.users.insert_one({"username": uname, "password": hash_pw(pw), "tier": "free", "banned": False, "is_admin": False, "created_at": datetime.now(timezone.utc)})
                 tok, _ = create_session(db, uname)
-                send_tg(f"New Registration\nUser: {uname}\nTier: Free")
+                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+                notify("New User Registration",
+                       tg_text=f"🆕 New Registration\nUser: {uname}\nTier: Free\nTime: {ts} UTC",
+                       email_body=f"A new user has registered.\n\nUsername: {uname}\nTier: Free\nTime: {ts} UTC")
                 self._json(200, {"success": True, "username": uname, "tier": "free"}, cookie=f"__Host-user_session={tok}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=86400")
             elif action == "signin":
                 uname = body.get("username","").strip().lower()
@@ -318,13 +366,21 @@ class Handler(BaseHTTPRequestHandler):
                 if not u or not verify_pw(pw, u.get("password","")): self._json(401, {"error":"Invalid credentials"}); return
                 if u.get("banned"): self._json(403, {"error":"Account banned"}); return
                 tok, _ = create_session(db, uname)
-                send_tg(f"Login\nUser: {uname}\nTier: {u.get('tier','free')}")
+                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+                notify("User Login",
+                       tg_text=f"🔑 Login\nUser: {uname}\nTier: {u.get('tier','free')}\nTime: {ts} UTC",
+                       email_body=f"User logged in.\n\nUsername: {uname}\nTier: {u.get('tier','free')}\nTime: {ts} UTC")
                 self._json(200, {"success": True, "username": uname, "tier": u.get("tier","free"), "isAdmin": u.get("is_admin", False)}, cookie=f"__Host-user_session={tok}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=86400")
             elif action == "admin_login":
+                au = body.get("username","").strip().lower()
                 pw = body.get("password","")
-                if pw != ADMIN_PASSWORD: self._json(401, {"error":"Wrong admin password"}); return
+                if au != ADMIN_USERNAME.lower() or pw != ADMIN_PASSWORD:
+                    self._json(401, {"error":"Wrong admin credentials"}); return
                 tok, _ = create_session(db, "admin", is_admin=True)
-                send_tg(f"Admin Login")
+                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+                notify("Admin Login Alert",
+                       tg_text=f"🛡️ Admin Login\nTime: {ts} UTC",
+                       email_body=f"Admin login detected.\n\nTime: {ts} UTC\nUsername: {au}")
                 self._json(200, {"success": True}, cookie=f"__Host-admin_session={tok}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=86400")
             elif action == "logout":
                 cookies = parse_cookies(self.headers.get("Cookie",""))
@@ -353,7 +409,7 @@ class Handler(BaseHTTPRequestHandler):
                 jobs[jid] = {"status":"queued","message":"Queued...","progress":0,"platform":detect_platform(url),"gdrive_link":"","filename":"","filesize":0,"created_at":time.time()}
             t = threading.Thread(target=process_download, args=(jid, url, u["username"], tier), daemon=True)
             t.start()
-            send_tg(f"Download Request\nUser: {u['username']} ({tier})\nPlatform: {detect_platform(url)}\nURL: {url[:100]}")
+            send_tg(f"⬇️ Download Request\nUser: {u['username']} ({tier})\nPlatform: {detect_platform(url)}\nURL: {url[:100]}")
             self._json(200, {"job_id": jid, "status": "queued"})
         elif path == "/api/admin/set-tier":
             if not db: self._json(500, {"error":"DB unavailable"}); return
@@ -363,7 +419,9 @@ class Handler(BaseHTTPRequestHandler):
             new_tier = body.get("tier","")
             if new_tier not in TIERS: self._json(400, {"error":"invalid tier"}); return
             db.users.update_one({"username": uname}, {"$set": {"tier": new_tier}})
-            send_tg(f"Tier Changed\nUser: {uname}\nNew Tier: {TIERS[new_tier]['label']}\nBy: admin")
+            notify("Tier Changed",
+                   tg_text=f"⬆️ Tier Changed\nUser: {uname}\nNew Tier: {TIERS[new_tier]['label']}\nBy: admin",
+                   email_body=f"User tier has been changed.\n\nUser: {uname}\nNew Tier: {TIERS[new_tier]['label']}\nChanged by: admin")
             self._json(200, {"success": True})
         elif path == "/api/admin/ban-user":
             if not db: self._json(500, {"error":"DB unavailable"}); return
@@ -371,7 +429,9 @@ class Handler(BaseHTTPRequestHandler):
             if not admin: self._json(403, {"error":"admin only"}); return
             uname = body.get("username","")
             db.users.update_one({"username": uname}, {"$set": {"banned": True}})
-            send_tg(f"User Banned\nUser: {uname}")
+            notify("User Banned",
+                   tg_text=f"🚫 User Banned\nUser: {uname}",
+                   email_body=f"A user has been banned.\n\nUsername: {uname}")
             self._json(200, {"success": True})
         elif path == "/api/admin/unban-user":
             if not db: self._json(500, {"error":"DB unavailable"}); return
@@ -379,14 +439,18 @@ class Handler(BaseHTTPRequestHandler):
             if not admin: self._json(403, {"error":"admin only"}); return
             uname = body.get("username","")
             db.users.update_one({"username": uname}, {"$set": {"banned": False}})
-            send_tg(f"User Unbanned\nUser: {uname}")
+            notify("User Unbanned",
+                   tg_text=f"✅ User Unbanned\nUser: {uname}",
+                   email_body=f"A user has been unbanned.\n\nUsername: {uname}")
             self._json(200, {"success": True})
         elif path == "/log":
             event = body.get("event","unknown")
             ip = self.client_address[0] if self.client_address else "unknown"
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
             if event == "visit":
-                send_tg(f"New Visit\nTime: {ts} UTC\nIP: {ip}")
+                notify("New Website Visit",
+                       tg_text=f"👁️ New Visit\nTime: {ts} UTC\nIP: {ip}",
+                       email_body=f"New website visit detected.\n\nTime: {ts} UTC\nIP: {ip}")
             if db:
                 db.logs.insert_one({"event": event, "ip": ip, "created_at": datetime.now(timezone.utc)})
             self._json(200, {"ok": True})
@@ -399,5 +463,9 @@ if __name__ == "__main__":
     print(f"  BOT_TOKEN: {'set' if BOT_TOKEN else 'MISSING'}")
     print(f"  GDRIVE: {'set' if GDRIVE_SA else 'MISSING'}")
     print(f"  DATABASE: {'set' if DATABASE_URL else 'MISSING'}")
-    send_tg("Download Server Started\nReady for downloads.")
+    print(f"  BREVO: {'set' if BREVO_API_KEY else 'MISSING'}")
+    print(f"  ADMIN_USERNAME: {ADMIN_USERNAME}")
+    notify("Download Server Started",
+           tg_text="🟢 Download Server Started\nReady for downloads.",
+           email_body="The download server has started and is ready for downloads.")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
