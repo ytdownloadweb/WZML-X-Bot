@@ -45,6 +45,16 @@ TIERS = {
 
 GUEST_TIER = {"max_bytes": 1073741824, "daily_limit": GUEST_DAILY_LIMIT, "label": "Guest"}
 
+# Platform access per tier — controls which sites each tier can download from
+TIER_PLATFORMS = {
+    "guest":   ["YouTube"],
+    "free":    ["YouTube"],
+    "bronze":  ["YouTube", "Instagram", "TikTok", "Facebook"],
+    "silver":  ["YouTube", "Instagram", "TikTok", "Facebook", "Twitter/X", "Reddit", "Vimeo"],
+    "gold":    ["YouTube", "Instagram", "TikTok", "Facebook", "Twitter/X", "Reddit", "Vimeo", "Dailymotion", "SoundCloud", "Pinterest"],
+    "supreme": None,  # None = all platforms allowed
+}
+
 jobs = {}
 jobs_lock = threading.Lock()
 _db = None
@@ -220,10 +230,27 @@ def upload_to_gdrive(filepath, filename):
 def process_download(job_id, url, username, tier, ip_hash=None):
     with jobs_lock:
         jobs[job_id]["status"] = "downloading"
-        jobs[job_id]["message"] = "Downloading..."
+        jobs[job_id]["message"] = "Checking video info..."
         jobs[job_id]["progress"] = 0
     tmpdir = tempfile.mkdtemp(prefix=f"dl_{job_id}_")
     try:
+        # Probe video for size (now in background thread, won't block HTTP response)
+        title_probe, vsize_probe = probe_video(url)
+        if vsize_probe:
+            tcfg_check = TIERS.get(tier, TIERS["free"]) if tier != "guest" else GUEST_TIER
+            if tcfg_check["max_bytes"] is not None and vsize_probe > tcfg_check["max_bytes"]:
+                with jobs_lock:
+                    if job_id in jobs:
+                        jobs[job_id]["status"] = "error"
+                        jobs[job_id]["message"] = f"File too large ({fmt_size(vsize_probe)}). Your {tcfg_check['label']} tier limit is {fmt_size(tcfg_check['max_bytes'])}."
+                return
+            with jobs_lock:
+                if job_id in jobs:
+                    jobs[job_id]["message"] = f"Downloading ({fmt_size(vsize_probe)})..."
+        else:
+            with jobs_lock:
+                if job_id in jobs:
+                    jobs[job_id]["message"] = "Downloading..."
         outtmpl = os.path.join(tmpdir, "%(title).80s.%(ext)s")
         cmd = ["yt-dlp","-f","best[ext=mp4][height<=1080]/best[ext=webm][height<=1080]/best","--merge-output-format","mp4","--no-playlist","--newline","--no-warnings","-o",outtmpl,url]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -399,7 +426,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length).decode()) if length else {}
-        except: body = {}
+        except Exception as e:
+            print(f"[POST] body parse error: {e}")
+            body = {}
         if path == "/api/auth":
             action = body.get("action", "")
             if action == "register":
@@ -453,7 +482,8 @@ class Handler(BaseHTTPRequestHandler):
             if not url or len(url) < 10: self._json(400, {"error":"valid URL required"}); return
 
             u, _ = get_session_user(db, self.headers)
-            ip = self.client_address[0] if self.client_address else "unknown"
+            ip = self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+            if not ip: ip = self.client_address[0] if self.client_address else "unknown"
             iph = mask_ip(ip)
 
             if u:
@@ -476,11 +506,13 @@ class Handler(BaseHTTPRequestHandler):
                 username = "guest"
                 ip_hash_for_record = iph
 
-            # Probe video for size check
-            title, vsize = probe_video(url)
-            if vsize and tcfg["max_bytes"] is not None and vsize > tcfg["max_bytes"]:
-                self._json(413, {"error":f"File too large ({fmt_size(vsize)}). Your {tcfg['label']} tier limit is {fmt_size(tcfg['max_bytes'])}. Upgrade to download larger files."}); return
+            # Platform enforcement — check tier allows this platform
+            platform = detect_platform(url)
+            allowed_platforms = TIER_PLATFORMS.get(tier)
+            if allowed_platforms is not None and platform not in allowed_platforms:
+                self._json(403, {"error":f"Your {tcfg['label']} tier does not support {platform}. Allowed platforms: {', '.join(allowed_platforms)}. Upgrade at t.me/DJ_Hackrr for more platforms."}); return
 
+            # NOTE: probe_video moved to background thread (was root cause of "Network error" timeout)
             jid = str(uuid.uuid4())[:8]
             with jobs_lock:
                 jobs[jid] = {"status":"queued","message":"Queued...","progress":0,"platform":detect_platform(url),"gdrive_link":"","filename":"","filesize":0,"created_at":time.time()}
@@ -524,7 +556,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"success": True})
         elif path == "/log":
             event = body.get("event","unknown")
-            ip = self.client_address[0] if self.client_address else "unknown"
+            ip = self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+            if not ip: ip = self.client_address[0] if self.client_address else "unknown"
             iph = mask_ip(ip)
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
             if event == "visit":
