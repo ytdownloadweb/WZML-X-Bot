@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-download_server.py v4 — Full-featured download server with auth, tiers, admin, GDrive upload.
+download_server.py v4 — Full-featured download server with auth, tiers, admin, Cloud upload.
 Changes from v3:
   - Guest downloads (no login required) with IP-based rate limiting (3 per 24h)
   - Rolling 24h window (not midnight reset) for all download quotas
@@ -9,7 +9,7 @@ Changes from v3:
   - Fixed cookies: SameSite=None instead of Lax (cross-origin auth works now)
   - Free tier daily_limit changed from 3 to 5
   - New endpoint: /api/guest-quota — returns remaining guest downloads
-Env: BOT_TOKEN, LOG_CHAT_ID, GDRIVE_ID, GDRIVE_SA, DATABASE_URL,
+Env: BOT_TOKEN, LOG_CHAT_ID, CLOUD_ID (GDRIVE_ID), CLOUD_SA (GDRIVE_SA), DATABASE_URL,
      ADMIN_USERNAME, ADMIN_PASSWORD,
      BREVO_API_KEY, BREVO_SENDER_EMAIL, OWNER_EMAIL, IP_SALT (optional)
 Port: 8081
@@ -184,6 +184,27 @@ def notify(subject, tg_text=None, email_body=None):
         email_body = tg_text or subject
     send_email(subject, email_body)
 
+def is_valid_url(url):
+    """Validate URL to prevent abuse — reject local IPs, javascript:, data:, etc."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        if not parsed.netloc:
+            return False
+        hostname = parsed.hostname or ""
+        blocked = ("localhost", "127.", "10.", "192.168.", "172.16.", "172.17.", "172.18.",
+                   "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
+                   "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.", "0.", "169.254.")
+        for b in blocked:
+            if hostname.startswith(b) or hostname == b.rstrip("."):
+                return False
+        if "169.254.169.254" in hostname or "metadata" in hostname:
+            return False
+        return True
+    except:
+        return False
+
 def detect_platform(url):
     u = url.lower()
     for domains, name in [(["youtube.com","youtu.be","m.youtube.com"],"YouTube"),(["instagram.com","instagr.am"],"Instagram"),(["tiktok.com"],"TikTok"),(["facebook.com","fb.watch","m.facebook.com"],"Facebook"),(["twitter.com","x.com","t.co"],"Twitter/X"),(["reddit.com","redd.it"],"Reddit"),(["vimeo.com"],"Vimeo"),(["dailymotion.com","dai.ly"],"Dailymotion"),(["soundcloud.com"],"SoundCloud"),(["pinterest.com","pin.it"],"Pinterest"),(["streamable.com"],"Streamable"),(["twitch.tv"],"Twitch")]:
@@ -207,7 +228,7 @@ def probe_video(url):
         print(f"[probe] {e}")
         return None, None
 
-def upload_to_gdrive(filepath, filename):
+def upload_to_cloud(filepath, filename):
     try:
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
@@ -224,10 +245,10 @@ def upload_to_gdrive(filepath, filename):
         svc.permissions().create(fileId=resp["id"], body={"role":"reader","type":"anyone"}).execute()
         return f"https://drive.google.com/file/d/{resp['id']}/view"
     except Exception as e:
-        print(f"[GDrive] {e}")
+        print(f"[Cloud] {e}")
         return None
 
-def process_download(job_id, url, username, tier, ip_hash=None):
+def process_download(job_id, url, username, tier, ip_hash=None, fmt="mp4", quality="1080"):
     with jobs_lock:
         jobs[job_id]["status"] = "downloading"
         jobs[job_id]["message"] = "Checking video info..."
@@ -252,7 +273,10 @@ def process_download(job_id, url, username, tier, ip_hash=None):
                 if job_id in jobs:
                     jobs[job_id]["message"] = "Downloading..."
         outtmpl = os.path.join(tmpdir, "%(title).80s.%(ext)s")
-        cmd = ["yt-dlp","-f","best[ext=mp4][height<=1080]/best[ext=webm][height<=1080]/best","--merge-output-format","mp4","--no-playlist","--newline","--no-warnings","-o",outtmpl,url]
+        if fmt == "mp3":
+            cmd = ["yt-dlp","-x","--audio-format","mp3","--audio-quality","0","--no-playlist","--newline","--no-warnings","-o",outtmpl,url]
+        else:
+            cmd = ["yt-dlp","-f","best[ext="+fmt+"][height<="+str(quality)+"]/best[ext=webm][height<="+str(quality)+"]/best","--merge-output-format",fmt,"--no-playlist","--newline","--no-warnings","-o",outtmpl,url]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         for line in proc.stdout:
             line = line.strip()
@@ -290,15 +314,15 @@ def process_download(job_id, url, username, tier, ip_hash=None):
         with jobs_lock:
             if job_id in jobs:
                 jobs[job_id]["status"] = "uploading"
-                jobs[job_id]["message"] = f"Uploading to Google Drive ({fsize/1048576:.1f} MB)..."
+                jobs[job_id]["message"] = f"Uploading to Cloud ({fsize/1048576:.1f} MB)..."
                 jobs[job_id]["progress"] = 92
-        link = upload_to_gdrive(filepath, files[0]) if GDRIVE_SA and GDRIVE_ID else ""
+        link = upload_to_cloud(filepath, files[0]) if GDRIVE_SA and GDRIVE_ID else ""
         with jobs_lock:
             if job_id in jobs:
                 jobs[job_id]["status"] = "done"
                 jobs[job_id]["message"] = "Complete!"
                 jobs[job_id]["progress"] = 100
-                jobs[job_id]["gdrive_link"] = link
+                jobs[job_id]["cloud_link"] = link
                 jobs[job_id]["filename"] = files[0]
                 jobs[job_id]["filesize"] = fsize
         db = get_db()
@@ -306,7 +330,7 @@ def process_download(job_id, url, username, tier, ip_hash=None):
             dl_record = {
                 "username": username, "url": url, "title": files[0],
                 "platform": detect_platform(url), "size_bytes": fsize,
-                "drive_link": link, "status": "completed",
+                "cloud_link": link, "status": "completed",
                 "created_at": datetime.now(timezone.utc)
             }
             if ip_hash: dl_record["ip_hash"] = ip_hash
@@ -314,8 +338,8 @@ def process_download(job_id, url, username, tier, ip_hash=None):
         ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
         user_display = f"{username} ({tier})" if username != "guest" else f"Guest (IP: {ip_hash[:8] if ip_hash else 'unknown'}...)"
         notify("Download Complete",
-               tg_text=f"✅ Download Complete\nUser: {user_display}\nFile: {files[0]}\nSize: {fsize/1048576:.1f} MB\nURL: {url[:80]}\nGDrive: {link or 'N/A'}\nTime: {ts} UTC",
-               email_body=f"A download has completed.\n\nUser: {user_display}\nFile: {files[0]}\nSize: {fsize/1048576:.1f} MB\nURL: {url[:80]}\nGDrive: {link or 'N/A'}\nTime: {ts} UTC")
+               tg_text=f"✅ Download Complete\nUser: {user_display}\nFile: {files[0]}\nSize: {fsize/1048576:.1f} MB\nURL: {url[:80]}\nCloud: {link or 'N/A'}\nTime: {ts} UTC",
+               email_body=f"A download has completed.\n\nUser: {user_display}\nFile: {files[0]}\nSize: {fsize/1048576:.1f} MB\nURL: {url[:80]}\nCloud: {link or 'N/A'}\nTime: {ts} UTC")
     except subprocess.TimeoutExpired:
         with jobs_lock:
             if job_id in jobs:
@@ -399,7 +423,7 @@ class Handler(BaseHTTPRequestHandler):
             u, _ = get_session_user(db, self.headers)
             if not u: self._json(401, {"error":"not authenticated"}); return
             items = list(db.downloads.find({"username": u["username"]}).sort("created_at", -1).limit(50))
-            self._json(200, [{"title": d.get("title",""), "size": d.get("size_bytes",0), "link": d.get("drive_link",""), "date": d.get("created_at","").isoformat() if isinstance(d.get("created_at"), datetime) else str(d.get("created_at","")), "platform": d.get("platform","")} for d in items])
+            self._json(200, [{"title": d.get("title",""), "size": d.get("size_bytes",0), "link": d.get("cloud_link",""), "date": d.get("created_at","").isoformat() if isinstance(d.get("created_at"), datetime) else str(d.get("created_at","")), "platform": d.get("platform","")} for d in items])
         elif path == "/api/admin/users":
             if not db: self._json(500, {"error":"DB unavailable"}); return
             admin = get_session_admin(db, self.headers)
@@ -480,6 +504,7 @@ class Handler(BaseHTTPRequestHandler):
             if not db: self._json(500, {"error":"DB unavailable"}); return
             url = body.get("url","").strip()
             if not url or len(url) < 10: self._json(400, {"error":"valid URL required"}); return
+            if not is_valid_url(url): self._json(400, {"error":"Invalid URL. Only http/https URLs are allowed."}); return
 
             u, _ = get_session_user(db, self.headers)
             ip = self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
@@ -513,10 +538,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(403, {"error":f"Your {tcfg['label']} tier does not support {platform}. Allowed platforms: {', '.join(allowed_platforms)}. Upgrade at t.me/DJ_Hackrr for more platforms."}); return
 
             # NOTE: probe_video moved to background thread (was root cause of "Network error" timeout)
+            fmt = body.get("format", "mp4")
+            quality = body.get("quality", "1080")
+            if fmt not in ("mp4", "mp3", "webm"):
+                fmt = "mp4"
+            if str(quality) not in ("144", "240", "360", "480", "720", "1080"):
+                quality = "1080"
             jid = str(uuid.uuid4())[:8]
             with jobs_lock:
-                jobs[jid] = {"status":"queued","message":"Queued...","progress":0,"platform":detect_platform(url),"gdrive_link":"","filename":"","filesize":0,"created_at":time.time()}
-            t = threading.Thread(target=process_download, args=(jid, url, username, tier, ip_hash_for_record), daemon=True)
+                jobs[jid] = {"status":"queued","message":"Queued...","progress":0,"platform":detect_platform(url),"cloud_link":"","filename":"","filesize":0,"created_at":time.time()}
+            t = threading.Thread(target=process_download, args=(jid, url, username, tier, ip_hash_for_record, fmt, quality), daemon=True)
             t.start()
 
             user_label = f"{username} ({tier})" if username != "guest" else f"Guest (IP: {iph[:8]}...)"
@@ -574,7 +605,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     print(f"Download server v4 on :{PORT}")
     print(f"  BOT_TOKEN: {'set' if BOT_TOKEN else 'MISSING'}")
-    print(f"  GDRIVE: {'set' if GDRIVE_SA else 'MISSING'}")
+    print(f"  Cloud Storage: {'set' if GDRIVE_SA else 'MISSING'}")
     print(f"  DATABASE: {'set' if DATABASE_URL else 'MISSING'}")
     print(f"  BREVO: {'set' if BREVO_API_KEY else 'MISSING'}")
     print(f"  ADMIN_USERNAME: {ADMIN_USERNAME}")
