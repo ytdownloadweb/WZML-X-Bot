@@ -1,1 +1,1 @@
-window.tunnelStatus = {"status": "online", "url": "https://draw-cruises-shade-archived.trycloudflare.com", "updated": "2026-08-19T22:58:04Z"};
+window.tunnelStatus = {"status": "offline", "url": "", "updated": "2026-08-20T03:13:38Z"};
