@@ -310,7 +310,7 @@ def fmt_size(b):
 # Cookie strings — SameSite=None for cross-origin (GitHub Pages -> Cloudflare tunnel)
 USER_COOKIE = "__Host-user_session={}; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=86400"
 ADMIN_COOKIE = "__Host-admin_session={}; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=86400"
-CLEAR_COOKIE = "__Host-user_session=; Path=/; Max-Age=0; SameSite=None; Secure; __Host-admin_session=; Path=/; Max-Age=0; SameSite=None; Secure"
+CLEAR_COOKIE = "__Host-user_session=; Path=/; Max-Age=0; SameSite=None; Secure|||__Host-admin_session=; Path=/; Max-Age=0; SameSite=None; Secure"
 
 class Handler(BaseHTTPRequestHandler):
     def _cors(self):
@@ -330,12 +330,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self._cors()
         if cookie:
-            # Support multiple Set-Cookie headers
-            for c in cookie.split("; __Host"):
+            # Support multiple Set-Cookie headers separated by "|||"
+            for c in cookie.split("|||"):
                 c = c.strip()
                 if c:
-                    if not c.startswith("__Host"):
-                        c = "__Host" + c
                     self.send_header("Set-Cookie", c)
         self.end_headers()
         self.wfile.write(json.dumps(data, default=str).encode())
