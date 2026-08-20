@@ -1,1 +1,1 @@
-window.tunnelStatus = {"status": "offline", "url": "", "updated": "2026-08-20T08:51:51Z"};
+window.tunnelStatus = {"status": "online", "url": "https://aerospace-accurate-wing-this.trycloudflare.com", "updated": "2026-08-20T08:54:03Z"};
