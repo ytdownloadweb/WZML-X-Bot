@@ -1,1 +1,1 @@
-window.tunnelStatus = {"status": "online", "url": "https://vista-mental-computer-adds.trycloudflare.com", "updated": "2026-08-20T12:00:02Z"};
+window.tunnelStatus = {"status": "offline", "url": "", "updated": "2026-08-20T17:00:17Z"};
