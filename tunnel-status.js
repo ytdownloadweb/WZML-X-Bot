@@ -1,1 +1,1 @@
-window.tunnelStatus = {"status": "offline", "url": "", "updated": "2026-08-20T10:25:15Z"};
+window.tunnelStatus = {"status": "online", "url": "https://fired-locator-directories-belle.trycloudflare.com", "updated": "2026-08-20T10:27:24Z"};
