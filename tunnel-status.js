@@ -1,1 +1,1 @@
-window.tunnelStatus = {"status": "offline", "url": "", "updated": "2026-08-21T17:00:51Z"};
+window.tunnelStatus = {"status": "online", "url": "https://contribution-fraser-response-rotary.trycloudflare.com", "updated": "2026-08-21T17:59:35Z"};
