@@ -1,1 +1,1 @@
-window.tunnelStatus = {"status": "online", "url": "https://jean-jpg-leadership-marking.trycloudflare.com", "updated": "2026-08-20T23:02:18Z"};
+window.tunnelStatus = {"status": "offline", "url": "", "updated": "2026-08-21T03:31:38Z"};
