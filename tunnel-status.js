@@ -1,1 +1,1 @@
-window.tunnelStatus = {"status": "online", "url": "https://diego-gloves-gps-render.trycloudflare.com", "updated": "2026-08-22T03:12:21Z"};
+window.tunnelStatus = {"status": "offline", "url": "", "updated": "2026-08-22T07:20:21Z"};
